@@ -50,7 +50,6 @@ Chrome/Edge-расширение Manifest V3 для ручного управл�
 - `manifest.json` — Manifest V3.
 - `src/api-models.js` — экспериментальные API-only slug.
 - `src/main.js` — панель, каталоги, история и перехват запросов.
-- `tests/payload.test.js` — проверки payload и исходного кода.
 - `CHANGELOG.md` — история проекта.
 
 ## Проверка
@@ -58,7 +57,6 @@ Chrome/Edge-расширение Manifest V3 для ручного управл�
 ```powershell
 node --check src\api-models.js
 node --check src\main.js
-node tests\payload.test.js
 ```
 
 API-only список является экспериментальным: наличие slug в OpenAI API не означает поддержку этого slug внутренним backend ChatGPT.
