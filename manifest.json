@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "GPT Models",
+  "version": "1.0.0",
+  "description": "Ручной выбор модели, thinking effort, service tier и Chat Mode в ChatGPT с историей UI-каталогов.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/api-models.js",
+        "src/main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
