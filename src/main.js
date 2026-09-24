@@ -1,4 +1,4 @@
-// GPT Models Chrome/Edge extension page script v1.0.0
+// GPT Models Chrome/Edge extension page script v1.3.3
 (() => {
     'use strict';
 
@@ -16,7 +16,7 @@
 
     const config = {
         /** Версия файла и панели. */
-        version: '1.0.0',
+        version: '1.3.3',
 
         /** URL backend-метода со списком моделей режима Work. */
         workModelsUrl: '/backend-api/tpp/models/?supports_model_picker_upgrade_presets=true',
@@ -33,6 +33,21 @@
         /** Путь финального запроса создания нового хода разговора. */
         conversationPath: '/backend-api/f/conversation',
 
+        /** Ключ штатной поверхности Chat/Work в localStorage web-клиента. */
+        nativeChatSurfaceStorageKey: 'oai/apps/tpp/chat-surface-mode',
+
+        /** Cookie штатной поверхности Chat/Work web-клиента. */
+        nativeChatSurfaceCookieName: 'oai-chat-surface-mode',
+
+        /** Cookie временного приоритета Chat над рекомендацией Work. */
+        nativeChatOverrideCookieName: 'oai-chat-surface-mode-chat-override-expires-at',
+
+        /** Срок штатной cookie поверхности в секундах. */
+        nativeChatSurfaceMaxAgeSeconds: 2 * 365 * 24 * 60 * 60,
+
+        /** Срок штатного Chat override в миллисекундах. */
+        nativeChatOverrideDurationMs: 4 * 60 * 60 * 1000,
+
         /** Значение выбора полного bypass, при котором исходящий payload передаётся без изменений. */
         autoModelSlug: 'auto',
 
@@ -48,8 +63,14 @@
         /** Ключ режима ускоренной обработки в localStorage. */
         fastModeStorageKey: 'gpt-model-picker.fast-mode.v1',
 
-        /** Ключ переключателя Chat Mode в localStorage. */
+        /** Ключ выбранного режима Chat/Work в localStorage. */
+        conversationExperienceStorageKey: 'gpt-model-picker.conversation-experience.v1',
+
+        /** Ключ отдельного backend-переключателя Chat Mode в localStorage. */
         forceChatStorageKey: 'gpt-model-picker.force-chat.v1',
+
+        /** Ключ независимых ручных backend-переопределений режимных полей. */
+        backendOverridesStorageKey: 'gpt-model-picker.backend-overrides.v1',
 
         /** Ключ позиции панели в localStorage. */
         positionStorageKey: 'gpt-model-picker.position.v1',
@@ -83,6 +104,112 @@
         { value: 'ultra', label: 'Ultra — ultra' }
     ];
 
+    const backendFieldDefinitions = [
+        {
+            key: 'conversation_origin',
+            label: 'conversation_origin',
+            target: 'payload',
+            path: ['conversation_origin'],
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить поле'],
+                ['null', 'null — Chat'],
+                ['json:"tpp"', '"tpp" — Work'],
+                ['custom', 'Custom JSON…']
+            ]
+        },
+        {
+            key: 'conversation_mode',
+            label: 'conversation_mode (raw)',
+            target: 'payload',
+            path: ['conversation_mode'],
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить поле'],
+                ['null', 'null'],
+                ['custom', 'Custom JSON…']
+            ]
+        },
+        {
+            key: 'conversation_mode_kind',
+            label: 'conversation_mode.kind',
+            target: 'payload',
+            path: ['conversation_mode', 'kind'],
+            pruneEmptyParents: true,
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить kind'],
+                ['null', 'null'],
+                ['json:"primary_assistant"', '"primary_assistant"'],
+                ['custom', 'Custom JSON…']
+            ]
+        },
+        {
+            key: 'chat_mode',
+            label: 'chat_mode',
+            target: 'payload',
+            path: ['chat_mode'],
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить поле'],
+                ['null', 'null'],
+                ['json:"chat"', '"chat"'],
+                ['custom', 'Custom JSON…']
+            ]
+        },
+        {
+            key: 'tpp_work_handoff_conversion',
+            label: 'tpp_work_handoff_conversion',
+            target: 'payload',
+            path: ['tpp_work_handoff_conversion'],
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить поле'],
+                ['null', 'null'],
+                ['true', 'true'],
+                ['false', 'false'],
+                ['custom', 'Custom JSON…']
+            ]
+        },
+        {
+            key: 'conversation_execution_target',
+            label: 'conversation_execution_target',
+            target: 'payload',
+            path: ['conversation_execution_target'],
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить поле'],
+                ['null', 'null'],
+                ['custom', 'Custom JSON…']
+            ]
+        },
+        {
+            key: 'message_conversation_execution_target',
+            label: 'message.metadata.conversation_execution_target',
+            target: 'userMessageMetadata',
+            path: ['conversation_execution_target'],
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить поле'],
+                ['null', 'null'],
+                ['custom', 'Custom JSON…']
+            ]
+        },
+        {
+            key: 'turn_origin',
+            label: 'turn_origin',
+            target: 'payload',
+            path: ['turn_origin'],
+            options: [
+                ['preserve', 'Auto — не менять'],
+                ['delete', 'Удалить поле'],
+                ['null', 'null'],
+                ['json:"targeted_reply"', '"targeted_reply"'],
+                ['custom', 'Custom JSON…']
+            ]
+        }
+    ];
+
     const state = {
         baseFetch: window.fetch,
         downstreamFetch: window.fetch,
@@ -93,7 +220,15 @@
         selectedModelSlug: '',
         selectedThinkingEffort: 'auto',
         fastModeEnabled: false,
+        selectedConversationExperience: 'chat',
         forceChatEnabled: true,
+        backendOverrides: {},
+        backendOverrideControls: {},
+        backendFieldSnapshots: {},
+        projectedChatSurfaceMode: '',
+        surfaceProjectionObserver: null,
+        surfaceProjectionTimer: null,
+        surfaceProjectionApplying: false,
         workModels: [],
         chatModels: [],
         historicalModels: [],
@@ -107,6 +242,7 @@
         input: null,
         thinkingSelect: null,
         fastCheckbox: null,
+        conversationExperienceSelect: null,
         forceChatCheckbox: null,
         hookStatus: null,
         catalogStatus: null,
@@ -240,17 +376,285 @@
     }
 
     /**
+     * Возвращает сохранённую настройку ручного backend-поля.
+     *
+     * @param {string} key
+     * @returns {{ mode: string, customValue: string }}
+     */
+    function getBackendOverrideSetting(key) {
+        const stored = state.backendOverrides[key];
+
+        return {
+            mode: typeof stored?.mode === 'string' ? stored.mode : 'preserve',
+            customValue: typeof stored?.customValue === 'string' ? stored.customValue : ''
+        };
+    }
+
+    /**
+     * Преобразует выбранный режим ручного поля в точное JSON-значение.
+     *
+     * Custom принимает только валидный JSON, поэтому строковые значения задаются
+     * с кавычками, например "my_value". Некорректное значение явно прерывает запрос.
+     *
+     * @param {{ mode: string, customValue: string }} setting
+     * @param {string} fieldLabel
+     * @returns {unknown}
+     */
+    function resolveBackendOverrideValue(setting, fieldLabel) {
+        if (setting.mode === 'null') {
+            return null;
+        }
+
+        if (setting.mode === 'true') {
+            return true;
+        }
+
+        if (setting.mode === 'false') {
+            return false;
+        }
+
+        if (setting.mode.startsWith('json:')) {
+            return JSON.parse(setting.mode.slice(5));
+        }
+
+        if (setting.mode === 'custom') {
+            try {
+                return JSON.parse(setting.customValue);
+            } catch (error) {
+                throw new Error(`Некорректный Custom JSON для ${fieldLabel}: ${error.message}`);
+            }
+        }
+
+        throw new Error(`Unsupported backend override mode for ${fieldLabel}: ${setting.mode}`);
+    }
+
+    /**
+     * Присваивает значение по вложенному пути, создавая отсутствующие объекты.
+     *
+     * @param {Record<string, any>} root
+     * @param {string[]} path
+     * @param {unknown} value
+     * @returns {boolean}
+     */
+    function assignNestedField(root, path, value) {
+        let target = root;
+
+        for (const segment of path.slice(0, -1)) {
+            if (!target[segment] || typeof target[segment] !== 'object' || Array.isArray(target[segment])) {
+                target[segment] = {};
+            }
+
+            target = target[segment];
+        }
+
+        const field = path.at(-1);
+
+        if (Object.is(target[field], value)) {
+            return false;
+        }
+
+        target[field] = value;
+
+        return true;
+    }
+
+    /**
+     * Удаляет поле по вложенному пути и при необходимости очищает пустые родительские объекты.
+     *
+     * @param {Record<string, any>} root
+     * @param {string[]} path
+     * @param {boolean} pruneEmptyParents
+     * @returns {boolean}
+     */
+    function deleteNestedField(root, path, pruneEmptyParents) {
+        const parents = [];
+        let target = root;
+
+        for (const segment of path.slice(0, -1)) {
+            if (!target?.[segment] || typeof target[segment] !== 'object') {
+                return false;
+            }
+
+            parents.push([target, segment]);
+            target = target[segment];
+        }
+
+        const field = path.at(-1);
+
+        if (!Object.prototype.hasOwnProperty.call(target, field)) {
+            return false;
+        }
+
+        delete target[field];
+
+        if (pruneEmptyParents) {
+            for (let index = parents.length - 1; index >= 0; index -= 1) {
+                const [parent, segment] = parents[index];
+                const child = parent[segment];
+
+                if (!child || typeof child !== 'object' || Object.keys(child).length > 0) {
+                    break;
+                }
+
+                delete parent[segment];
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Читает вложенное поле без смешивания отсутствующего значения и JSON null.
+     *
+     * @param {Record<string, any>} root
+     * @param {string[]} path
+     * @returns {{ present: boolean, value: unknown }}
+     */
+    function readNestedField(root, path) {
+        let target = root;
+
+        for (const segment of path.slice(0, -1)) {
+            if (!target || typeof target !== 'object' || !Object.prototype.hasOwnProperty.call(target, segment)) {
+                return { present: false, value: undefined };
+            }
+
+            target = target[segment];
+        }
+
+        if (!target || typeof target !== 'object') {
+            return { present: false, value: undefined };
+        }
+
+        const field = path.at(-1);
+
+        return Object.prototype.hasOwnProperty.call(target, field)
+            ? { present: true, value: target[field] }
+            : { present: false, value: undefined };
+    }
+
+    /**
+     * Возвращает фактическое значение backend-поля из финального исходящего payload.
+     *
+     * Для message.metadata используется последнее пользовательское сообщение,
+     * поскольку оно представляет текущий пользовательский ход в conversation payload.
+     *
+     * @param {Record<string, any>} payload
+     * @param {typeof backendFieldDefinitions[number]} definition
+     * @returns {{ present: boolean, value: unknown }}
+     */
+    function readBackendFieldValue(payload, definition) {
+        if (definition.target === 'payload') {
+            return readNestedField(payload, definition.path);
+        }
+
+        if (definition.target === 'userMessageMetadata' && Array.isArray(payload.messages)) {
+            const userMessages = payload.messages.filter((message) => message?.author?.role === 'user');
+            const currentUserMessage = userMessages.at(-1);
+
+            if (currentUserMessage?.metadata && typeof currentUserMessage.metadata === 'object') {
+                return readNestedField(currentUserMessage.metadata, definition.path);
+            }
+
+            return { present: false, value: undefined };
+        }
+
+        return { present: false, value: undefined };
+    }
+
+    /**
+     * Сохраняет снимок режимных backend-полей после всех преобразований запроса.
+     *
+     * Снимок используется JSON-полями панели как read-only отображение фактического
+     * значения. При режиме Custom то же поле становится редактором ручного JSON.
+     *
+     * @param {Record<string, any>} payload
+     */
+    function captureBackendFieldSnapshots(payload) {
+        for (const definition of backendFieldDefinitions) {
+            const current = readBackendFieldValue(payload, definition);
+
+            state.backendFieldSnapshots[definition.key] = {
+                observed: true,
+                present: current.present,
+                value: current.value
+            };
+
+            renderBackendOverrideControl(definition.key);
+        }
+    }
+
+    /**
+     * Применяет финальные ручные backend-переопределения после UI Chat/Work и Chat Mode.
+     *
+     * Каждый контрол независимо сохраняет поле, удаляет его или записывает точное JSON-значение.
+     * Для message.metadata.conversation_execution_target настройка применяется ко всем
+     * пользовательским сообщениям текущего payload и при необходимости создаёт metadata.
+     *
+     * @param {Record<string, any>} payload
+     * @returns {{ changed: boolean, summary: string[] }}
+     */
+    function applyManualBackendOverrides(payload) {
+        let changed = false;
+        const summary = [];
+
+        for (const definition of backendFieldDefinitions) {
+            const setting = getBackendOverrideSetting(definition.key);
+
+            if (setting.mode === 'preserve') {
+                continue;
+            }
+
+            const value = setting.mode === 'delete'
+                ? undefined
+                : resolveBackendOverrideValue(setting, definition.label);
+            const valueText = setting.mode === 'delete' ? 'DELETE' : JSON.stringify(value);
+
+            if (definition.target === 'payload') {
+                changed = setting.mode === 'delete'
+                    ? deleteNestedField(payload, definition.path, Boolean(definition.pruneEmptyParents)) || changed
+                    : assignNestedField(payload, definition.path, value) || changed;
+            } else if (definition.target === 'userMessageMetadata' && Array.isArray(payload.messages)) {
+                for (const message of payload.messages) {
+                    if (message?.author?.role !== 'user') {
+                        continue;
+                    }
+
+                    if (setting.mode === 'delete') {
+                        if (message.metadata && typeof message.metadata === 'object') {
+                            changed = deleteNestedField(message.metadata, definition.path, false) || changed;
+                        }
+                    } else {
+                        if (!message.metadata || typeof message.metadata !== 'object') {
+                            message.metadata = {};
+                            changed = true;
+                        }
+
+                        changed = assignNestedField(message.metadata, definition.path, value) || changed;
+                    }
+                }
+            }
+
+            summary.push(`${definition.label}=${valueText}`);
+        }
+
+        return { changed, summary };
+    }
+
+    /**
      * Формирует JSON payload для этапов conversation/init, f/conversation/prepare и f/conversation.
      *
-     * Пункт «Не изменять модель» включает полный bypass: функция возвращает исходный body
-     * и сведения о штатных параметрах без записи модели, thinking effort, service tier и Chat Mode.
-     * Для явно выбранной модели каждый ручной параметр применяется независимо. Значения thinking
-     * effort остаются доступными даже при отсутствии режима в каталожном JSON; совместимость
-     * выбранной комбинации определяет backend.
+     * Пункт «Не изменять модель» включает полный bypass и передаёт исходный body без изменений.
+     * Режим UI Chat/Work задаёт conversation_origin: Chat записывает null, Work записывает tpp,
+     * Auto сохраняет штатное значение. Отдельный переключатель Chat Mode сохраняет набор
+     * backend-сигналов обычного Chat: primary_assistant, conversation_origin=null, chat_mode=chat
+     * при наличии поля и отсутствие Work handoff/execution target. Chat Mode имеет приоритет
+     * над выбранным Work origin. После этих пресетов независимые ручные backend-контролы
+     * финально задают, удаляют или сохраняют каждое режимное поле. Явные ручные настройки
+     * разрешены и для Gizmo/custom GPT; без них Gizmo сохраняет штатные режимные поля.
      *
      * @param {string} body
      * @param {string} requestPath
-     * @returns {{ body: string, changed: boolean, bypass: boolean, requestPath: string, originalModelSlug: string, requestedModelSlug: string, originalThinkingEffort: string, requestedThinkingEffort: string, originalServiceTier: string, requestedServiceTier: string, originalConversationOrigin: string, originalConversationMode: string, requestedConversationMode: string } | null}
+     * @returns {{ body: string, changed: boolean, bypass: boolean, requestPath: string, originalModelSlug: string, requestedModelSlug: string, originalThinkingEffort: string, requestedThinkingEffort: string, originalServiceTier: string, requestedServiceTier: string, originalConversationOrigin: string, requestedConversationOrigin: string, originalConversationMode: string, requestedConversationMode: string, originalChatMode: string, requestedChatMode: string, originalTurnOrigin: string, requestedTurnOrigin: string, originalHasTppWorkHandoffConversion: boolean, requestedHasTppWorkHandoffConversion: boolean, originalConversationExecutionTarget: unknown, requestedConversationExecutionTarget: unknown, requestedConversationExperience: string, forceChatApplied: boolean, manualBackendOverrideSummary: string[] } | null}
      */
     function updateRequestBody(body, requestPath) {
         if (!body) {
@@ -286,12 +690,23 @@
         const originalServiceTier = String(
             payload.service_tier || payload.backend_service_tier || ''
         );
-        const originalConversationOrigin = String(payload.conversation_origin || '');
+        const originalConversationOrigin = payload.conversation_origin == null
+            ? ''
+            : String(payload.conversation_origin);
         const originalConversationMode = String(payload.conversation_mode?.kind || '');
+        const originalChatMode = String(payload.chat_mode || '');
+        const originalTurnOrigin = String(payload.turn_origin || '');
+        const originalHasTppWorkHandoffConversion = payload.tpp_work_handoff_conversion != null;
+        const originalConversationExecutionTarget = payload.conversation_execution_target;
         const bypass = state.selectedModelSlug === config.autoModelSlug;
         const overrideModel = !bypass;
         const overrideThinkingEffort = !bypass && state.selectedThinkingEffort !== 'auto';
         const isGizmoRequest = payload.gizmo_id != null;
+        const overrideConversationExperience = (
+            !bypass
+            && state.selectedConversationExperience !== 'auto'
+            && !isGizmoRequest
+        );
         const forceChat = !bypass && state.forceChatEnabled && !isGizmoRequest;
         let changed = false;
 
@@ -331,6 +746,19 @@
             ) || changed;
         }
 
+        if (overrideConversationExperience) {
+            changed = assignRequestField(
+                payload,
+                'conversation_origin',
+                state.selectedConversationExperience === 'work' ? 'tpp' : null,
+                isInitRequest || isPrepareRequest || isConversationRequest
+            ) || changed;
+
+            if (state.selectedConversationExperience === 'chat') {
+                changed = deleteRequestField(payload, 'tpp_work_handoff_conversion') || changed;
+            }
+        }
+
         if (forceChat) {
             if (
                 (isPrepareRequest || isConversationRequest)
@@ -358,7 +786,10 @@
                     if (
                         message?.author?.role === 'user'
                         && message.metadata
-                        && Object.prototype.hasOwnProperty.call(message.metadata, 'conversation_execution_target')
+                        && Object.prototype.hasOwnProperty.call(
+                            message.metadata,
+                            'conversation_execution_target'
+                        )
                     ) {
                         delete message.metadata.conversation_execution_target;
                         changed = true;
@@ -366,6 +797,11 @@
                 }
             }
         }
+
+        const manualBackendResult = bypass
+            ? { changed: false, summary: [] }
+            : applyManualBackendOverrides(payload);
+        changed = manualBackendResult.changed || changed;
 
         if (overrideThinkingEffort) {
             changed = assignRequestField(
@@ -397,6 +833,17 @@
             ) || changed;
         }
 
+        const requestedConversationOrigin = payload.conversation_origin == null
+            ? ''
+            : String(payload.conversation_origin);
+        const requestedConversationMode = String(payload.conversation_mode?.kind || '');
+        const requestedChatMode = String(payload.chat_mode || '');
+        const requestedTurnOrigin = String(payload.turn_origin || '');
+        const requestedHasTppWorkHandoffConversion = payload.tpp_work_handoff_conversion != null;
+        const requestedConversationExecutionTarget = payload.conversation_execution_target;
+
+        captureBackendFieldSnapshots(payload);
+
         return {
             body: changed ? JSON.stringify(payload) : body,
             changed,
@@ -411,8 +858,22 @@
             originalServiceTier,
             requestedServiceTier: !bypass && state.fastModeEnabled ? 'priority' : originalServiceTier,
             originalConversationOrigin,
+            requestedConversationOrigin,
             originalConversationMode,
-            requestedConversationMode: forceChat ? 'chat' : originalConversationMode
+            requestedConversationMode,
+            originalChatMode,
+            requestedChatMode,
+            originalTurnOrigin,
+            requestedTurnOrigin,
+            originalHasTppWorkHandoffConversion,
+            requestedHasTppWorkHandoffConversion,
+            originalConversationExecutionTarget,
+            requestedConversationExecutionTarget,
+            requestedConversationExperience: overrideConversationExperience
+                ? state.selectedConversationExperience
+                : 'auto',
+            forceChatApplied: forceChat,
+            manualBackendOverrideSummary: manualBackendResult.summary
         };
     }
 
@@ -648,41 +1109,62 @@
     /**
      * Формирует строку параметров, применённых к исходящему запросу.
      *
-     * @param {{ bypass: boolean, requestPath: string, originalModelSlug: string, requestedModelSlug: string, originalThinkingEffort: string, requestedThinkingEffort: string, originalServiceTier: string, requestedServiceTier: string, originalConversationOrigin: string, originalConversationMode: string, requestedConversationMode: string }} requestInfo
+     * Диагностика показывает исходные и финальные режимные поля после UI-пресета,
+     * Chat Mode и независимых ручных backend-переопределений.
+     *
+     * @param {ReturnType<typeof updateRequestBody>} requestInfo
      * @returns {string}
      */
     function formatRequestStatus(requestInfo) {
+        const originText = requestInfo.originalConversationOrigin || 'null/absent';
+        const requestedOriginText = requestInfo.requestedConversationOrigin || 'null/absent';
+        const conversationModeText = requestInfo.originalConversationMode || 'absent';
+        const requestedConversationModeText = requestInfo.requestedConversationMode || 'absent';
+        const chatModeText = requestInfo.originalChatMode || 'absent';
+        const requestedChatModeText = requestInfo.requestedChatMode || 'absent';
+        const turnOriginText = requestInfo.originalTurnOrigin || 'absent';
+        const requestedTurnOriginText = requestInfo.requestedTurnOrigin || 'absent';
+        const handoffText = requestInfo.originalHasTppWorkHandoffConversion ? 'yes' : 'no';
+        const requestedHandoffText = requestInfo.requestedHasTppWorkHandoffConversion ? 'yes' : 'no';
+        const executionTargetText = requestInfo.originalConversationExecutionTarget === undefined
+            ? 'absent'
+            : JSON.stringify(requestInfo.originalConversationExecutionTarget);
+        const requestedExecutionTargetText = requestInfo.requestedConversationExecutionTarget === undefined
+            ? 'absent'
+            : JSON.stringify(requestInfo.requestedConversationExecutionTarget);
+
         if (requestInfo.bypass) {
             const modelText = requestInfo.originalModelSlug || 'штатный slug';
             const thinkingText = requestInfo.originalThinkingEffort || 'штатный';
             const speedText = requestInfo.originalServiceTier || 'штатная';
-            const modeText = requestInfo.originalConversationMode
-                || (requestInfo.originalConversationOrigin ? `origin ${requestInfo.originalConversationOrigin}` : 'штатный');
 
-            return `Запрос [${getRequestStageName(requestInfo.requestPath)}]: bypass без изменений; модель ${modelText}; thinking ${thinkingText}; скорость ${speedText}; режим ${modeText}`;
+            return `Запрос [${getRequestStageName(requestInfo.requestPath)}]: bypass без изменений; модель ${modelText}; thinking ${thinkingText}; скорость ${speedText}; origin ${originText}; conversation_mode ${conversationModeText}; chat_mode ${chatModeText}; turn_origin ${turnOriginText}; work_handoff ${handoffText}; execution_target ${executionTargetText}`;
         }
 
-        const modelText = state.selectedModelSlug === config.autoModelSlug
-            ? `Не изменять модель (${requestInfo.originalModelSlug || 'штатный slug'})`
-            : requestInfo.originalModelSlug && requestInfo.originalModelSlug !== requestInfo.requestedModelSlug
-                ? `${requestInfo.originalModelSlug} → ${requestInfo.requestedModelSlug}`
-                : requestInfo.requestedModelSlug;
+        const modelText = requestInfo.originalModelSlug && requestInfo.originalModelSlug !== requestInfo.requestedModelSlug
+            ? `${requestInfo.originalModelSlug} → ${requestInfo.requestedModelSlug}`
+            : requestInfo.requestedModelSlug;
         const thinkingText = state.selectedThinkingEffort === 'auto'
             ? `thinking Auto${requestInfo.requestedThinkingEffort ? ` (${requestInfo.requestedThinkingEffort})` : ''}`
             : `thinking ${requestInfo.requestedThinkingEffort}`;
         const speedText = state.fastModeEnabled
             ? 'скорость 1.5x (priority)'
             : `скорость штатная${requestInfo.requestedServiceTier ? ` (${requestInfo.requestedServiceTier})` : ''}`;
-        const modeText = requestInfo.requestedConversationMode === 'chat'
-            ? `режим Chat Mode${requestInfo.originalConversationOrigin ? `; origin ${requestInfo.originalConversationOrigin} → Chat` : ''}`
-            : `режим штатный${requestInfo.originalConversationMode ? ` (${requestInfo.originalConversationMode})` : ''}`;
+        const uiModeText = requestInfo.requestedConversationExperience === 'auto'
+            ? `UI Auto; origin ${originText} → ${requestedOriginText}`
+            : `UI ${requestInfo.requestedConversationExperience === 'work' ? 'Work' : 'Chat'}; origin ${originText} → ${requestedOriginText}`;
+        const forceChatText = requestInfo.forceChatApplied ? 'Chat Mode ON' : 'Chat Mode OFF';
+        const manualText = requestInfo.manualBackendOverrideSummary.length > 0
+            ? `manual [${requestInfo.manualBackendOverrideSummary.join(', ')}]`
+            : 'manual none';
 
-        return `Запрос [${getRequestStageName(requestInfo.requestPath)}]: ${modelText}; ${thinkingText}; ${speedText}; ${modeText}`;
+        return `Запрос [${getRequestStageName(requestInfo.requestPath)}]: ${modelText}; ${thinkingText}; ${speedText}; ${uiModeText}; ${forceChatText}; conversation_mode ${conversationModeText} → ${requestedConversationModeText}; chat_mode ${chatModeText} → ${requestedChatModeText}; turn_origin ${turnOriginText} → ${requestedTurnOriginText}; work_handoff ${handoffText} → ${requestedHandoffText}; execution_target ${executionTargetText} → ${requestedExecutionTargetText}; ${manualText}`;
     }
 
     /**
      * Перехватывает этапы инициализации, подготовки и создания хода, применяет
-     * независимые ручные настройки для явно выбранной модели и наблюдает поток финального ответа.
+     * независимые ручные настройки модели, thinking effort, service tier и режима Chat/Work
+     * для явно выбранной модели и наблюдает поток финального ответа.
      * В режиме bypass исходный запрос передаётся без изменения payload.
      *
      * @param {RequestInfo | URL} input
@@ -706,7 +1188,17 @@
         }
 
         const requestBody = await readRequestBody(input, init);
-        const requestInfo = requestBody && updateRequestBody(requestBody.body, requestPath);
+        let requestInfo = null;
+
+        try {
+            requestInfo = requestBody && updateRequestBody(requestBody.body, requestPath);
+        } catch (error) {
+            updateRequestStatus(
+                `Запрос [${getRequestStageName(requestPath)}]: ${error.message}`,
+                'error'
+            );
+            throw error;
+        }
 
         if (!requestBody || !requestInfo) {
             updateRequestStatus(
@@ -851,12 +1343,21 @@
             ? 'Auto'
             : state.selectedThinkingEffort;
         const speedText = state.fastModeEnabled ? '1.5x / priority' : 'штатная';
-        const modeText = state.forceChatEnabled ? 'Chat Mode' : 'штатный';
+        const modeText = state.selectedConversationExperience === 'auto'
+            ? 'UI Auto / штатный'
+            : state.selectedConversationExperience === 'work'
+                ? 'UI Work'
+                : 'UI Chat';
+        const chatModeText = state.forceChatEnabled ? 'Chat Mode ON' : 'Chat Mode OFF';
+        const manualBackendCount = backendFieldDefinitions.filter((definition) => {
+            return getBackendOverrideSetting(definition.key).mode !== 'preserve';
+        }).length;
+        const manualBackendText = `backend manual ${manualBackendCount}/${backendFieldDefinitions.length}`;
 
         if (state.selectedModelSlug === config.autoModelSlug) {
             setStatus(
                 state.selectedStatus,
-                `Выбрано: Не изменять модель — bypass; панель: thinking ${thinkingText}; скорость ${speedText}; режим ${modeText}`,
+                `Выбрано: Не изменять модель — bypass; панель: thinking ${thinkingText}; скорость ${speedText}; ${modeText}; ${chatModeText}; ${manualBackendText}`,
                 'warning'
             );
             return;
@@ -864,7 +1365,7 @@
 
         setStatus(
             state.selectedStatus,
-            `Выбрано: ${state.selectedModelSlug}; thinking ${thinkingText}; скорость ${speedText}; режим ${modeText}`,
+            `Выбрано: ${state.selectedModelSlug}; thinking ${thinkingText}; скорость ${speedText}; ${modeText}; ${chatModeText}; ${manualBackendText}`,
             'success'
         );
     }
@@ -950,10 +1451,677 @@
 
 
     /**
-     * Устанавливает режим Chat Mode и сохраняет состояние.
+     * Нормализует внутреннее значение ChatGPT surface в режим панели.
      *
-     * Для ручного model slug включённый режим применяет Chat-параметры,
-     * а выключенный оставляет параметры режима исходного запроса.
+     * @param {unknown} value
+     * @returns {'chat' | 'work' | ''}
+     */
+    function normalizeNativeChatSurfaceValue(value) {
+        if (value === 'work') {
+            return 'work';
+        }
+
+        if (value === 'chat' || value === 'chatgpt') {
+            return 'chat';
+        }
+
+        return '';
+    }
+
+    /**
+     * Возвращает React Fiber, которому принадлежит DOM-элемент ChatGPT.
+     *
+     * React добавляет production-ключи с динамическими суффиксами. Функция
+     * поддерживает Fiber, legacy internal instance и root container, но не
+     * изменяет найденные структуры.
+     *
+     * @param {Element} element
+     * @returns {object | null}
+     */
+    function getReactFiber(element) {
+        const fiberKey = Reflect.ownKeys(element).find((key) => {
+            const name = String(key);
+
+            return name.startsWith('__reactFiber$')
+                || name.startsWith('__reactInternalInstance$')
+                || name.startsWith('__reactContainer$');
+        });
+        const fiber = fiberKey ? element[fiberKey] : null;
+
+        return fiber?.current || fiber || null;
+    }
+
+    /**
+     * Возвращает ближайший React Fiber для элемента или его родителей.
+     *
+     * @param {Element | null} element
+     * @returns {object | null}
+     */
+    function getNearestReactFiber(element) {
+        for (let current = element; current instanceof Element; current = current.parentElement) {
+            const fiber = getReactFiber(current);
+
+            if (fiber) {
+                return fiber;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Собирает DOM-точки текущего composer и страницы, от которых можно выйти к React Fiber.
+     *
+     * @returns {Element[]}
+     */
+    function getChatSurfaceFiberAnchors() {
+        const selectors = [
+            '[data-composer-surface="true"] button.__composer-pill[aria-haspopup="menu"]',
+            '[data-composer-surface="true"] button[aria-haspopup="menu"]',
+            '[data-composer-surface="true"]',
+            'form[data-type="unified-composer"]',
+            '#prompt-textarea',
+            '#composer-submit-button',
+            '#thread-bottom-container',
+            'main',
+            'body'
+        ];
+        const anchors = [];
+
+        for (const selector of selectors) {
+            const element = document.querySelector(selector);
+
+            if (element instanceof Element && !anchors.includes(element)) {
+                anchors.push(element);
+            }
+        }
+
+        return anchors;
+    }
+
+    /**
+     * Собирает React root Fiber из DOM, не полагаясь на конкретный id контейнера.
+     *
+     * @returns {object[]}
+     */
+    function getReactRootFibers() {
+        const roots = [];
+        const seen = new Set();
+        const rootsQuery = 'html, body, main, #__next, [id], [data-testid], [data-composer-surface="true"]';
+
+        for (const element of document.querySelectorAll(rootsQuery)) {
+            if (!(element instanceof Element)) {
+                continue;
+            }
+
+            for (const key of Reflect.ownKeys(element)) {
+                if (!String(key).startsWith('__reactContainer$')) {
+                    continue;
+                }
+
+                const root = element[key]?.current || element[key];
+
+                if (root && !seen.has(root)) {
+                    seen.add(root);
+                    roots.push(root);
+                }
+            }
+        }
+
+        for (const anchor of getChatSurfaceFiberAnchors()) {
+            const fiber = getNearestReactFiber(anchor);
+
+            if (!fiber) {
+                continue;
+            }
+
+            let root = fiber;
+
+            while (root.return) {
+                root = root.return;
+            }
+
+            if (root && !seen.has(root)) {
+                seen.add(root);
+                roots.push(root);
+            }
+        }
+
+        return roots;
+    }
+
+    /**
+     * Определяет фактически отрисованный Chat/Work composer.
+     *
+     * Work-пикер содержит структурный slider marker, которого нет у Chat-пикера.
+     * Это проверка результата рендера, а не сохранённого localStorage/cookie.
+     *
+     * @returns {'chat' | 'work' | ''}
+     */
+    function getRenderedChatSurfaceMode() {
+        const composer = document.querySelector('[data-composer-surface="true"]')
+            || document.querySelector('form[data-type="unified-composer"]')
+            || document.querySelector('#thread-bottom-container');
+        const modelTrigger = document.querySelector(
+            '[data-composer-surface="true"] button.__composer-pill[aria-haspopup="menu"], '
+            + '[data-composer-surface="true"] button[aria-haspopup="menu"], '
+            + 'button[data-testid="model-switcher-dropdown-button"], '
+            + 'button[data-testid="Model-switCher-dropdown-button"]'
+        );
+
+        if (modelTrigger instanceof Element) {
+            return modelTrigger.querySelector(
+                '[data-animated-slider-trigger="true"], [data-work-model-picker="true"]'
+            )
+                ? 'work'
+                : 'chat';
+        }
+
+        return composer instanceof Element ? 'chat' : '';
+    }
+
+    /**
+     * Возвращает основной composer, к которому применяется визуальная проекция Chat/Work.
+     *
+     * @returns {Element | null}
+     */
+    function getSurfaceComposerRoot() {
+        return document.querySelector('[data-composer-surface="true"]')
+            || document.querySelector('form[data-type="unified-composer"]')
+            || document.querySelector('#thread-bottom-container')
+            || null;
+    }
+
+    /**
+     * Возвращает поле ввода текущего composer.
+     *
+     * @returns {HTMLElement | null}
+     */
+    function getSurfacePromptEditor() {
+        const editor = document.querySelector('#prompt-textarea')
+            || getSurfaceComposerRoot()?.querySelector('[contenteditable="true"], textarea');
+
+        return editor instanceof HTMLElement ? editor : null;
+    }
+
+    /**
+     * Возвращает видимые кнопки выбора модели текущего composer.
+     *
+     * @returns {HTMLElement[]}
+     */
+    function getSurfaceModelButtons() {
+        const selectors = [
+            '[data-composer-surface="true"] button.__composer-pill[aria-haspopup="menu"]',
+            '[data-composer-surface="true"] button[aria-haspopup="menu"]',
+            'button[data-testid="model-switcher-dropdown-button"]',
+            'button[data-testid="Model-switCher-dropdown-button"]'
+        ];
+
+        return selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+            .filter((element, index, list) => {
+                return element instanceof HTMLElement
+                    && list.indexOf(element) === index
+                    && element.closest('#gpt-model-picker-panel') == null;
+            });
+    }
+
+    /**
+     * Возвращает видимые кнопки отправки/остановки composer.
+     *
+     * @returns {HTMLElement[]}
+     */
+    function getSurfaceActionButtons() {
+        const selectors = [
+            '#composer-submit-button',
+            '[data-composer-surface="true"] button[data-testid="send-button"]',
+            '[data-composer-surface="true"] button[aria-label*="Send"]',
+            '[data-composer-surface="true"] button[aria-label*="Stop"]'
+        ];
+
+        return selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+            .filter((element, index, list) => {
+                return element instanceof HTMLElement
+                    && list.indexOf(element) === index
+                    && element.closest('#gpt-model-picker-panel') == null;
+            });
+    }
+
+    /**
+     * Сохраняет исходное значение DOM-атрибута для последующего восстановления.
+     *
+     * @param {HTMLElement} element
+     * @param {string} attributeName
+     */
+    function rememberOriginalAttribute(element, attributeName) {
+        const storageKey = `gptModelPickerOriginal${attributeName.replace(/[^a-z0-9]/gi, '')}`;
+
+        if (Object.prototype.hasOwnProperty.call(element.dataset, storageKey)) {
+            return;
+        }
+
+        element.dataset[storageKey] = element.getAttribute(attributeName) ?? '';
+    }
+
+    /**
+     * Восстанавливает сохранённое значение DOM-атрибута.
+     *
+     * @param {HTMLElement} element
+     * @param {string} attributeName
+     */
+    function restoreOriginalAttribute(element, attributeName) {
+        const storageKey = `gptModelPickerOriginal${attributeName.replace(/[^a-z0-9]/gi, '')}`;
+
+        if (!Object.prototype.hasOwnProperty.call(element.dataset, storageKey)) {
+            return;
+        }
+
+        const originalValue = element.dataset[storageKey];
+
+        if (originalValue) {
+            element.setAttribute(attributeName, originalValue);
+        } else {
+            element.removeAttribute(attributeName);
+        }
+
+        delete element.dataset[storageKey];
+    }
+
+    /**
+     * Добавляет или обновляет бейдж поверхности на кнопке выбора модели.
+     *
+     * @param {HTMLElement} button
+     * @param {'chat' | 'work'} experience
+     */
+    function setSurfaceBadge(button, experience) {
+        let badge = button.querySelector(':scope > .gpt-model-picker-surface-badge');
+
+        if (!(badge instanceof HTMLElement)) {
+            badge = document.createElement('span');
+            badge.className = 'gpt-model-picker-surface-badge';
+            badge.setAttribute('aria-hidden', 'true');
+            button.append(badge);
+        }
+
+        badge.textContent = experience === 'work' ? 'Work UI' : 'Chat UI';
+    }
+
+    /** Удаляет добавленные расширением бейджи поверхности. */
+    function clearSurfaceBadges() {
+        for (const badge of document.querySelectorAll('.gpt-model-picker-surface-badge')) {
+            badge.remove();
+        }
+    }
+
+    /**
+     * Применяет визуальное состояние Chat/Work к уже отрисованному composer.
+     *
+     * Это fallback-слой результата: он не нажимает штатный toggle и не зависит от
+     * расположения React state. Расширение помечает html и composer, меняет
+     * placeholder поля ввода, добавляет бейдж к model picker и подсвечивает action button.
+     * Backend-поля продолжают задаваться fetch-перехватом независимо от этой проекции.
+     *
+     * @param {'chat' | 'work'} experience
+     * @returns {{ composerFound: boolean, promptFound: boolean, modelButtons: number, actionButtons: number }}
+     */
+    function applySurfaceProjection(experience) {
+        state.projectedChatSurfaceMode = experience;
+        state.surfaceProjectionApplying = true;
+
+        try {
+            document.documentElement.dataset.gptModelPickerSurface = experience;
+            document.body?.setAttribute('data-gpt-model-picker-surface', experience);
+
+            const composer = getSurfaceComposerRoot();
+            const promptEditor = getSurfacePromptEditor();
+            const modelButtons = getSurfaceModelButtons();
+            const actionButtons = getSurfaceActionButtons();
+
+            if (composer instanceof HTMLElement) {
+                composer.dataset.gptModelPickerSurface = experience;
+            }
+
+            if (promptEditor) {
+                rememberOriginalAttribute(promptEditor, 'data-placeholder');
+                rememberOriginalAttribute(promptEditor, 'aria-placeholder');
+                rememberOriginalAttribute(promptEditor, 'placeholder');
+
+                if (experience === 'work') {
+                    promptEditor.setAttribute('data-placeholder', 'What should we work on?');
+                    promptEditor.setAttribute('aria-placeholder', 'What should we work on?');
+                    promptEditor.setAttribute('placeholder', 'What should we work on?');
+                } else {
+                    restoreOriginalAttribute(promptEditor, 'data-placeholder');
+                    restoreOriginalAttribute(promptEditor, 'aria-placeholder');
+                    restoreOriginalAttribute(promptEditor, 'placeholder');
+                }
+            }
+
+            clearSurfaceBadges();
+
+            for (const button of modelButtons) {
+                button.dataset.gptModelPickerSurface = experience;
+                setSurfaceBadge(button, experience);
+            }
+
+            for (const button of actionButtons) {
+                button.dataset.gptModelPickerSurface = experience;
+            }
+
+            return {
+                composerFound: composer instanceof Element,
+                promptFound: Boolean(promptEditor),
+                modelButtons: modelButtons.length,
+                actionButtons: actionButtons.length
+            };
+        } finally {
+            state.surfaceProjectionApplying = false;
+        }
+    }
+
+    /** Планирует повторное применение визуальной проекции после React-render. */
+    function scheduleSurfaceProjection() {
+        if (!state.projectedChatSurfaceMode || state.surfaceProjectionApplying) {
+            return;
+        }
+
+        if (state.surfaceProjectionTimer !== null) {
+            window.clearTimeout(state.surfaceProjectionTimer);
+        }
+
+        state.surfaceProjectionTimer = window.setTimeout(() => {
+            state.surfaceProjectionTimer = null;
+            applySurfaceProjection(state.projectedChatSurfaceMode);
+        }, 50);
+    }
+
+    /** Запускает наблюдение за composer, чтобы React-render не стирал визуальную проекцию. */
+    function startSurfaceProjectionObserver() {
+        if (state.surfaceProjectionObserver || typeof MutationObserver !== 'function') {
+            return;
+        }
+
+        state.surfaceProjectionObserver = new MutationObserver(scheduleSurfaceProjection);
+        state.surfaceProjectionObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    /** Очищает визуальную проекцию поверхности Chat/Work. */
+    function clearSurfaceProjection() {
+        state.projectedChatSurfaceMode = '';
+        document.documentElement.removeAttribute('data-gpt-model-picker-surface');
+        document.body?.removeAttribute('data-gpt-model-picker-surface');
+        clearSurfaceBadges();
+
+        const promptEditor = getSurfacePromptEditor();
+
+        if (promptEditor) {
+            restoreOriginalAttribute(promptEditor, 'data-placeholder');
+            restoreOriginalAttribute(promptEditor, 'aria-placeholder');
+            restoreOriginalAttribute(promptEditor, 'placeholder');
+        }
+
+        for (const element of document.querySelectorAll('[data-gpt-model-picker-surface]')) {
+            if (element instanceof HTMLElement && element.id !== 'gpt-model-picker-panel') {
+                delete element.dataset.gptModelPickerSurface;
+            }
+        }
+    }
+
+    /**
+     * Находит React state-dispatcher, который владеет текущим Chat/Work surface.
+     *
+     * Поиск начинается от composer и принимает только hook с распознаваемым
+     * значением surface и React queue.dispatch. Если найдено несколько разных
+     * dispatch-функций, функция не угадывает нужную и завершает переключение
+     * явной ошибкой.
+     *
+     * @returns {{dispatch: Function, value: 'chat' | 'chatgpt' | 'work'} | null}
+     */
+    function findChatSurfaceReactDispatcher() {
+        const renderedMode = getRenderedChatSurfaceMode();
+        const candidates = [];
+        const seenCandidateDispatchers = new Set();
+
+        /**
+         * @param {object} fiber
+         * @param {string} scope
+         * @param {number} score
+         */
+        function collectHooks(fiber, scope, score) {
+            let hook = fiber?.memoizedState;
+
+            for (let hookIndex = 0; hook && hookIndex < 120; hookIndex += 1, hook = hook.next) {
+                const dispatch = hook.queue?.dispatch;
+
+                if (typeof dispatch !== 'function' || seenCandidateDispatchers.has(dispatch)) {
+                    continue;
+                }
+
+                const stateValue = hook.queue?.lastRenderedState ?? hook.memoizedState;
+                const normalizedMode = normalizeNativeChatSurfaceValue(stateValue);
+
+                if (!normalizedMode) {
+                    continue;
+                }
+
+                seenCandidateDispatchers.add(dispatch);
+                candidates.push({
+                    dispatch,
+                    value: stateValue,
+                    mode: normalizedMode,
+                    scope,
+                    score: score + (renderedMode && normalizedMode === renderedMode ? 20 : 0)
+                });
+            }
+        }
+
+        const anchors = getChatSurfaceFiberAnchors();
+        const seenAncestors = new Set();
+
+        for (const anchor of anchors) {
+            let fiber = getNearestReactFiber(anchor);
+
+            for (let depth = 0; fiber && depth < 160; depth += 1, fiber = fiber.return) {
+                if (seenAncestors.has(fiber)) {
+                    continue;
+                }
+
+                seenAncestors.add(fiber);
+                collectHooks(fiber, 'ancestor', 100 - depth);
+            }
+        }
+
+        if (candidates.length === 0) {
+            const seenFibers = new Set();
+            const roots = getReactRootFibers();
+
+            for (const root of roots) {
+                const stack = [root];
+
+                while (stack.length > 0) {
+                    const fiber = stack.pop();
+
+                    if (!fiber || seenFibers.has(fiber)) {
+                        continue;
+                    }
+
+                    seenFibers.add(fiber);
+                    collectHooks(fiber, 'root', renderedMode ? 20 : 0);
+
+                    for (let child = fiber.child; child; child = child.sibling) {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+
+        if (candidates.length === 0) {
+            return null;
+        }
+
+        const sortedCandidates = candidates.sort((left, right) => right.score - left.score);
+        const bestScore = sortedCandidates[0].score;
+        const bestCandidates = sortedCandidates.filter((candidate) => candidate.score === bestScore);
+
+        if (bestCandidates.length > 1) {
+            const values = bestCandidates.map((candidate) => `${candidate.scope}:${String(candidate.value)}`).join(', ');
+
+            throw new Error(
+                `Найдено несколько React Chat/Work state-dispatchers (${bestCandidates.length}: ${values}); UI не изменён`
+            );
+        }
+
+        return bestCandidates[0];
+    }
+
+    /**
+     * Переключает уже отрисованный ChatGPT composer между Chat и Work in-place.
+     *
+     * Функция не ищет и не нажимает штатный Chat/Work toggle. Когда удаётся найти
+     * React state-dispatcher, вызывается штатный React render. Если dispatcher не
+     * найден, применяется визуальная проекция результата: composer, model picker,
+     * поле ввода и action button получают видимое состояние выбранной поверхности.
+     *
+     * @param {'chat' | 'work'} experience
+     * @returns {'already-rendered' | 'react-dispatch'}
+     */
+    function applyRenderedChatSurfaceMode(experience) {
+        const renderedMode = getRenderedChatSurfaceMode();
+        const candidate = renderedMode === experience ? null : findChatSurfaceReactDispatcher();
+
+        if (candidate) {
+            const nextValue = experience === 'work'
+                ? 'work'
+                : candidate.value === 'chatgpt'
+                    ? 'chatgpt'
+                    : 'chat';
+
+            candidate.dispatch(nextValue);
+            const projection = applySurfaceProjection(experience);
+            startSurfaceProjectionObserver();
+
+            return `react-dispatch; projection composer=${projection.composerFound ? 'yes' : 'no'} prompt=${projection.promptFound ? 'yes' : 'no'} model=${projection.modelButtons} action=${projection.actionButtons}`;
+        }
+
+        const projection = applySurfaceProjection(experience);
+        startSurfaceProjectionObserver();
+
+        return `visual-projection; rendered=${renderedMode || 'unknown'} composer=${projection.composerFound ? 'yes' : 'no'} prompt=${projection.promptFound ? 'yes' : 'no'} model=${projection.modelButtons} action=${projection.actionButtons}`;
+    }
+
+    /**
+     * Синхронизирует поверхность штатного web-клиента с Chat или Work без reload.
+     *
+     * Сначала записываются те же persisted surface-значения, которыми пользуется
+     * ChatGPT. Затем напрямую обновляется React state текущего composer; штатный
+     * Chat/Work toggle для этого не требуется и не вызывается. URL, history,
+     * navigation, reload, branch, handoff и backend-конвертация не используются.
+     *
+     * @param {'chat' | 'work'} experience
+     */
+    function syncNativeChatSurfaceMode(experience) {
+        if (!['chat', 'work'].includes(experience)) {
+            throw new Error(`Unsupported native chat surface: ${experience}`);
+        }
+
+        const surfaceMode = experience === 'work' ? 'work' : 'chat';
+        const serializedMode = JSON.stringify(surfaceMode);
+
+        localStorage.setItem(config.nativeChatSurfaceStorageKey, serializedMode);
+        document.cookie = [
+            `${config.nativeChatSurfaceCookieName}=${encodeURIComponent(surfaceMode)}`,
+            'Path=/',
+            `Max-Age=${config.nativeChatSurfaceMaxAgeSeconds}`,
+            'Secure',
+            'SameSite=Lax'
+        ].join('; ');
+
+        if (experience === 'chat') {
+            const expiresAt = Date.now() + config.nativeChatOverrideDurationMs;
+
+            document.cookie = [
+                `${config.nativeChatOverrideCookieName}=${expiresAt}`,
+                'Path=/',
+                `Max-Age=${Math.floor(config.nativeChatOverrideDurationMs / 1000)}`,
+                'Secure',
+                'SameSite=Lax'
+            ].join('; ');
+        } else {
+            document.cookie = [
+                `${config.nativeChatOverrideCookieName}=`,
+                'Path=/',
+                'Max-Age=0',
+                'Secure',
+                'SameSite=Lax'
+            ].join('; ');
+        }
+
+        return applyRenderedChatSurfaceMode(experience);
+    }
+
+    /**
+     * Устанавливает режим UI Chat/Work и сохраняет состояние панели.
+     *
+     * Auto не трогает штатную поверхность и сохраняет conversation_origin исходного
+     * запроса. Chat и Work после явного выбора синхронизируют persisted surface,
+     * React state текущего composer и соответствующий conversation_origin запросов.
+     * Chat Mode и Backend fields могут затем задать другое финальное backend-значение.
+     * Инициализация панели только восстанавливает сохранённое значение контрола.
+     *
+     * @param {'auto' | 'chat' | 'work'} experience
+     * @param {boolean} persist
+     */
+    function setSelectedConversationExperience(experience, persist) {
+        if (!['auto', 'chat', 'work'].includes(experience)) {
+            throw new Error(`Unsupported conversation experience: ${experience}`);
+        }
+
+        state.selectedConversationExperience = experience;
+
+        let surfaceSyncError = null;
+        let surfaceSyncResult = '';
+
+        if (persist) {
+            localStorage.setItem(config.conversationExperienceStorageKey, experience);
+
+            if (experience !== 'auto') {
+                try {
+                    surfaceSyncResult = syncNativeChatSurfaceMode(experience);
+                } catch (error) {
+                    surfaceSyncError = error;
+                }
+            } else {
+                clearSurfaceProjection();
+            }
+        }
+
+        if (state.conversationExperienceSelect) {
+            state.conversationExperienceSelect.value = experience;
+        }
+
+        updateSelectedStatus();
+
+        if (surfaceSyncError) {
+            updateRequestStatus(`UI ${experience.toUpperCase()}: ${surfaceSyncError.message}`, 'error');
+        } else if (surfaceSyncResult) {
+            updateRequestStatus(`UI ${experience.toUpperCase()}: ${surfaceSyncResult}`, 'success');
+        } else if (experience === 'auto' && persist) {
+            updateRequestStatus('UI AUTO: визуальная проекция очищена', 'neutral');
+        }
+
+        restoreHook();
+    }
+
+    /**
+     * Устанавливает отдельный backend-переключатель Chat Mode и сохраняет состояние.
+     *
+     * Включённый режим добавляет к явно выбранной модели Chat-сигналы исходящего
+     * payload независимо от визуальной поверхности Chat/Work. Ручные значения
+     * блока Backend fields применяются после этого пресета и могут переопределить
+     * любой его сигнал. Переключатель не выполняет navigation, reload, branch
+     * или backend-конвертацию.
      *
      * @param {boolean} enabled
      * @param {boolean} persist
@@ -969,6 +2137,153 @@
             state.forceChatCheckbox.checked = state.forceChatEnabled;
         }
 
+        updateSelectedStatus();
+        restoreHook();
+    }
+
+    /**
+     * Читает сохранённые ручные backend-переопределения и отбрасывает неизвестные ключи.
+     *
+     * @returns {Record<string, { mode: string, customValue: string }>}
+     */
+    function loadBackendOverrides() {
+        let stored;
+
+        try {
+            stored = JSON.parse(localStorage.getItem(config.backendOverridesStorageKey) || '{}');
+        } catch (error) {
+            log('stored backend overrides are invalid', error);
+            return {};
+        }
+
+        if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+            return {};
+        }
+
+        const result = {};
+
+        for (const definition of backendFieldDefinitions) {
+            const setting = stored[definition.key];
+            const allowedModes = new Set(definition.options.map(([mode]) => mode));
+
+            if (!setting || typeof setting !== 'object' || !allowedModes.has(setting.mode)) {
+                continue;
+            }
+
+            result[definition.key] = {
+                mode: setting.mode,
+                customValue: typeof setting.customValue === 'string' ? setting.customValue : ''
+            };
+        }
+
+        return result;
+    }
+
+    /**
+     * Обновляет JSON-поле одного backend-контрола.
+     *
+     * В Auto поле read-only показывает фактическое значение последнего исходящего
+     * payload. Для фиксированных ручных режимов оно показывает итоговое значение,
+     * которое будет записано. При Custom это же поле становится редактируемым и
+     * используется как источник точного JSON. Отсутствующее поле отображается
+     * пустым значением с поясняющим placeholder, чтобы не смешивать отсутствие с null.
+     *
+     * @param {string} key
+     */
+    function renderBackendOverrideControl(key) {
+        const controls = state.backendOverrideControls[key];
+
+        if (!controls) {
+            return;
+        }
+
+        const definition = backendFieldDefinitions.find((item) => item.key === key);
+        const setting = getBackendOverrideSetting(key);
+        const snapshot = state.backendFieldSnapshots[key];
+
+        controls.select.value = setting.mode;
+        controls.input.readOnly = setting.mode !== 'custom';
+        controls.input.disabled = false;
+        controls.input.classList.remove('has-invalid-value');
+
+        if (setting.mode === 'custom') {
+            controls.input.value = setting.customValue;
+            controls.input.placeholder = 'Custom JSON';
+            controls.input.title = 'Введите валидный JSON: строку в кавычках, число, boolean, null, объект или массив';
+            return;
+        }
+
+        if (setting.mode === 'delete') {
+            controls.input.value = '';
+            controls.input.placeholder = 'поле будет удалено';
+            controls.input.title = 'Ручной режим удалит поле из исходящего payload';
+            return;
+        }
+
+        if (setting.mode !== 'preserve') {
+            const value = resolveBackendOverrideValue(setting, definition?.label || key);
+
+            controls.input.value = JSON.stringify(value);
+            controls.input.placeholder = '';
+            controls.input.title = 'Финальное ручное JSON-значение исходящего payload';
+            return;
+        }
+
+        if (!snapshot?.observed) {
+            controls.input.value = '';
+            controls.input.placeholder = 'ещё не наблюдалось';
+            controls.input.title = 'Значение появится после перехвата подходящего исходящего запроса';
+            return;
+        }
+
+        if (!snapshot.present) {
+            controls.input.value = '';
+            controls.input.placeholder = 'поле отсутствует';
+            controls.input.title = 'В последнем исходящем payload это поле отсутствовало';
+            return;
+        }
+
+        controls.input.value = JSON.stringify(snapshot.value);
+        controls.input.placeholder = '';
+        controls.input.title = 'Фактическое JSON-значение в последнем исходящем payload';
+    }
+
+    /**
+     * Сохраняет независимое ручное backend-переопределение.
+     *
+     * @param {string} key
+     * @param {string} mode
+     * @param {string} customValue
+     * @param {boolean} persist
+     */
+    function setBackendOverride(key, mode, customValue, persist) {
+        const definition = backendFieldDefinitions.find((item) => item.key === key);
+
+        if (!definition || !definition.options.some(([optionMode]) => optionMode === mode)) {
+            throw new Error(`Unsupported backend override: ${key} / ${mode}`);
+        }
+
+        const normalizedCustomValue = mode === 'custom'
+            ? String(customValue || 'null')
+            : String(customValue || '');
+
+        if (mode === 'custom') {
+            resolveBackendOverrideValue(
+                { mode, customValue: normalizedCustomValue },
+                definition.label
+            );
+        }
+
+        state.backendOverrides[key] = {
+            mode,
+            customValue: normalizedCustomValue
+        };
+
+        if (persist) {
+            localStorage.setItem(config.backendOverridesStorageKey, JSON.stringify(state.backendOverrides));
+        }
+
+        renderBackendOverrideControl(key);
         updateSelectedStatus();
         restoreHook();
     }
@@ -1293,8 +2608,8 @@
     /**
      * Возвращает bearer-токен текущей сессии ChatGPT.
      *
-     * Значение используется только в памяти для запроса TPP-каталога и не
-     * записывается в DOM, console или localStorage.
+     * Значение используется только в памяти и не записывается в состояние
+     * расширения, DOM, console или localStorage.
      *
      * @returns {Promise<string>}
      */
@@ -1640,8 +2955,9 @@
      * Добавляет компактную изменяемую по размеру панель управления и диагностики.
      *
      * Шапка содержит иконку, название и версию и служит областью перемещения.
-     * Модель, thinking effort, скорость и Chat Mode применяются сразу при изменении,
-     * кроме полного bypass пункта «Не изменять модель». Размер и положение панели
+     * Модель, thinking effort, скорость, UI Chat/Work, Chat Mode и независимые backend-поля
+     * применяются сразу после подтверждения значения, кроме полного bypass пункта
+     * «Не изменять модель». Размер и положение панели
      * сохраняются между перезагрузками страницы.
      */
     function createPanel() {
@@ -1683,6 +2999,12 @@
             class: 'gpt-model-picker-select',
             'aria-label': 'Глубина рассуждения'
         });
+        const conversationExperienceLabel = createElement('label', { class: 'gpt-model-picker-field' });
+        const conversationExperienceLabelText = createElement('span', { class: 'gpt-model-picker-field-label' }, 'UI Chat / Work');
+        const conversationExperienceSelect = createElement('select', {
+            class: 'gpt-model-picker-select',
+            'aria-label': 'Режим разговора Chat или Work'
+        });
         const toggles = createElement('div', { class: 'gpt-model-picker-toggles' });
         const fastLabel = createElement('label', { class: 'gpt-model-picker-toggle' });
         const fastCheckbox = createElement('input', {
@@ -1698,13 +3020,51 @@
             'aria-label': 'Chat Mode'
         });
         const forceChatText = createElement('span', {}, 'Chat Mode');
+        const backendOverrides = createElement('div', { class: 'gpt-model-picker-backend-overrides' });
+        const backendOverridesTitle = createElement(
+            'div',
+            { class: 'gpt-model-picker-backend-title' },
+            'Backend fields — текущее / ручное JSON'
+        );
+        const backendOverrideControls = {};
+
+        backendOverrides.append(backendOverridesTitle);
+
+        for (const definition of backendFieldDefinitions) {
+            const field = createElement('label', { class: 'gpt-model-picker-backend-field' });
+            const label = createElement('span', { class: 'gpt-model-picker-field-label' }, definition.label);
+            const row = createElement('div', { class: 'gpt-model-picker-backend-row' });
+            const overrideSelect = createElement('select', {
+                class: 'gpt-model-picker-select gpt-model-picker-backend-select',
+                'aria-label': `Ручное значение ${definition.label}`
+            });
+            const customInput = createElement('input', {
+                class: 'gpt-model-picker-input gpt-model-picker-backend-input',
+                type: 'text',
+                placeholder: 'Custom JSON',
+                'aria-label': `Текущее или ручное JSON-значение ${definition.label}`
+            });
+
+            for (const [value, optionLabel] of definition.options) {
+                overrideSelect.append(createElement('option', { value }, optionLabel));
+            }
+
+            row.append(overrideSelect, customInput);
+            field.append(label, row);
+            backendOverrides.append(field);
+            backendOverrideControls[definition.key] = {
+                select: overrideSelect,
+                input: customInput
+            };
+        }
+
         const diagnostics = createElement('div', { class: 'gpt-model-picker-diagnostics' });
         const hookStatus = createElement('div', { class: 'gpt-model-picker-status', role: 'status' });
         const catalogStatus = createElement('div', { class: 'gpt-model-picker-status', role: 'status' }, 'Каталоги: инициализация…');
         const selectedStatus = createElement('div', { class: 'gpt-model-picker-status', role: 'status' }, 'Выбрано: инициализация…');
         const requestStatus = createElement('div', { class: 'gpt-model-picker-status', role: 'status' }, 'Запрос: ещё не отправлялся');
         const backendStatus = createElement('div', { class: 'gpt-model-picker-status', role: 'status' }, 'Backend: ещё не проверен');
-        const hint = createElement('div', { class: 'gpt-model-picker-hint' }, 'Bypass не меняет payload. История — фиолетовая, API-only — голубой, непредусмотренный thinking — янтарный.');
+        const hint = createElement('div', { class: 'gpt-model-picker-hint' }, 'JSON-поле показывает фактическое/итоговое значение. В режиме Custom оно становится редактором. Порядок: UI Chat/Work → Chat Mode → Backend fields; ручные backend-поля имеют максимальный приоритет. Расширение не делает redirect, branch, handoff или конвертацию conversation.');
 
         icon.innerHTML = '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="8" fill="#69afed"/><path d="M9 11.5h14M9 16h9M9 20.5h12" fill="none" stroke="#0f1720" stroke-width="2.2" stroke-linecap="round"/><circle cx="23" cy="20.5" r="2.2" fill="#f2f5f8"/></svg>';
         titleCopy.append(title, version);
@@ -1713,11 +3073,19 @@
         modelLabel.append(modelLabelText, select);
         inputLabel.append(inputLabelText, input);
         thinkingLabel.append(thinkingLabelText, thinkingSelect);
+        conversationExperienceLabel.append(conversationExperienceLabelText, conversationExperienceSelect);
+        for (const option of [
+            { value: 'auto', label: 'Auto — не вмешиваться' },
+            { value: 'chat', label: 'Chat' },
+            { value: 'work', label: 'Work' }
+        ]) {
+            conversationExperienceSelect.append(createElement('option', { value: option.value }, option.label));
+        }
         fastLabel.append(fastCheckbox, fastText);
         forceChatLabel.append(forceChatCheckbox, forceChatText);
         toggles.append(fastLabel, forceChatLabel);
         diagnostics.append(hookStatus, catalogStatus, selectedStatus, requestStatus, backendStatus);
-        content.append(modelLabel, inputLabel, thinkingLabel, toggles, diagnostics, hint);
+        content.append(modelLabel, inputLabel, thinkingLabel, conversationExperienceLabel, toggles, backendOverrides, diagnostics, hint);
         panel.append(header, content);
         document.body.append(panel);
 
@@ -1729,7 +3097,9 @@
             input,
             thinkingSelect,
             fastCheckbox,
+            conversationExperienceSelect,
             forceChatCheckbox,
+            backendOverrideControls,
             hookStatus,
             catalogStatus,
             selectedStatus,
@@ -1743,8 +3113,41 @@
         });
         input.addEventListener('input', handleManualModelInput);
         thinkingSelect.addEventListener('change', () => setSelectedThinkingEffort(thinkingSelect.value, true));
+        conversationExperienceSelect.addEventListener('change', () => setSelectedConversationExperience(conversationExperienceSelect.value, true));
         fastCheckbox.addEventListener('change', () => setFastModeEnabled(fastCheckbox.checked, true));
         forceChatCheckbox.addEventListener('change', () => setForceChatEnabled(forceChatCheckbox.checked, true));
+
+        for (const definition of backendFieldDefinitions) {
+            const controls = backendOverrideControls[definition.key];
+
+            controls.select.addEventListener('change', () => {
+                try {
+                    setBackendOverride(
+                        definition.key,
+                        controls.select.value,
+                        controls.input.value,
+                        true
+                    );
+                } catch (error) {
+                    controls.select.value = getBackendOverrideSetting(definition.key).mode;
+                    setStatus(state.requestStatus, error.message, 'error');
+                }
+            });
+            controls.input.addEventListener('change', () => {
+                if (controls.select.value !== 'custom') {
+                    return;
+                }
+
+                try {
+                    setBackendOverride(definition.key, 'custom', controls.input.value, true);
+                } catch (error) {
+                    controls.input.classList.add('has-invalid-value');
+                    controls.input.title = error.message;
+                    setStatus(state.requestStatus, error.message, 'error');
+                }
+            });
+        }
+
         collapseButton.addEventListener('click', () => setPanelCollapsed(!state.collapsed, true));
         header.addEventListener('pointerdown', handleHeaderPointerDown);
         header.addEventListener('pointermove', handleHeaderPointerMove);
@@ -1754,8 +3157,16 @@
 
         state.selectedThinkingEffort = localStorage.getItem(config.thinkingEffortStorageKey) || 'auto';
         state.fastModeEnabled = localStorage.getItem(config.fastModeStorageKey) === 'true';
+        state.selectedConversationExperience = localStorage.getItem(config.conversationExperienceStorageKey) || 'chat';
         state.forceChatEnabled = localStorage.getItem(config.forceChatStorageKey) !== 'false';
+        state.backendOverrides = loadBackendOverrides();
+
+        for (const definition of backendFieldDefinitions) {
+            renderBackendOverrideControl(definition.key);
+        }
+
         setSelectedThinkingEffort(state.selectedThinkingEffort, false);
+        setSelectedConversationExperience(state.selectedConversationExperience, false);
         setFastModeEnabled(state.fastModeEnabled, false);
         setForceChatEnabled(state.forceChatEnabled, false);
 
@@ -1768,6 +3179,7 @@
             state.resizeObserver.observe(panel);
         }
     }
+
     /**
      * Добавляет компактный оконный стиль панели с изменяемым размером.
      *
@@ -1781,7 +3193,7 @@
         style.textContent = `
             #gpt-model-picker-panel {
                 position: fixed; right: 16px; bottom: 16px; z-index: 2147483647;
-                display: flex; width: min(330px, calc(100vw - 16px)); height: min(430px, calc(100vh - 16px));
+                display: flex; width: min(380px, calc(100vw - 16px)); height: min(720px, calc(100vh - 16px));
                 min-width: 260px; min-height: 220px; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px);
                 box-sizing: border-box; flex-direction: column; overflow: hidden; resize: both;
                 color: #f2f5f8; background: #111418; border: 1px solid #34404b; border-radius: 10px;
@@ -1820,7 +3232,7 @@
             .gpt-model-picker-collapse:hover { background: #283f4d; border-color: #34404b; }
             .gpt-model-picker-content {
                 display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; gap: 5px;
-                box-sizing: border-box; padding: 7px; overflow: hidden;
+                box-sizing: border-box; padding: 7px; overflow: auto;
             }
             .gpt-model-picker-field { display: grid; flex: 0 0 auto; gap: 2px; min-width: 0; }
             .gpt-model-picker-field-label { color: #aeb2b6; font-size: 9px; }
@@ -1829,6 +3241,7 @@
                 color: #f2f5f8; background: #222732; border: 1px solid #34404b;
                 border-radius: 6px; font: 10.5px/1.2 Arial, sans-serif;
             }
+            .gpt-model-picker-input.has-invalid-value { border-color: #e16b6b; }
             .gpt-model-picker-select option.is-unsupported { color: #e3a12f; }
             .gpt-model-picker-select option.is-historical-model { color: #c084fc; }
             .gpt-model-picker-select option.is-experimental-model { color: #22d3ee; }
@@ -1841,6 +3254,40 @@
             .gpt-model-picker-select.has-experimental-model {
                 color: #22d3ee; border-color: #22d3ee;
             }
+            .gpt-model-picker-backend-overrides {
+                display: grid; flex: 0 0 auto; gap: 4px; padding: 6px;
+                background: #171c22; border: 1px solid #2a323b; border-radius: 6px;
+            }
+            .gpt-model-picker-backend-title { color: #dce2e8; font-size: 9.5px; font-weight: 700; }
+            .gpt-model-picker-backend-field { display: grid; gap: 2px; min-width: 0; }
+            .gpt-model-picker-backend-row {
+                display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 4px;
+            }
+            .gpt-model-picker-backend-select, .gpt-model-picker-backend-input { min-height: 25px; font-size: 9.5px; }
+            .gpt-model-picker-backend-input[readonly] { opacity: 0.78; cursor: default; }
+            .gpt-model-picker-surface-badge {
+                display: inline-grid; margin-left: 6px; padding: 1px 5px; place-items: center;
+                border-radius: 999px; background: #283f4d; color: #d7f3ff;
+                font: 700 9px/1.4 Arial, sans-serif; white-space: nowrap; vertical-align: middle;
+            }
+            html[data-gpt-model-picker-surface='work'] [data-gpt-model-picker-surface='work'] {
+                --gpt-model-picker-surface-accent: #69afed;
+            }
+            html[data-gpt-model-picker-surface='work'] [data-composer-surface='true'],
+            html[data-gpt-model-picker-surface='work'] form[data-type='unified-composer'],
+            html[data-gpt-model-picker-surface='work'] #thread-bottom-container {
+                outline: 1px solid rgb(105 175 237 / 38%); outline-offset: 2px;
+            }
+            html[data-gpt-model-picker-surface='work'] #prompt-textarea {
+                caret-color: #69afed;
+            }
+            html[data-gpt-model-picker-surface='work'] button[data-gpt-model-picker-surface='work'] {
+                border-color: rgb(105 175 237 / 65%) !important;
+                box-shadow: 0 0 0 1px rgb(105 175 237 / 22%) inset;
+            }
+            html[data-gpt-model-picker-surface='chat'] .gpt-model-picker-surface-badge {
+                background: #2d3440; color: #f2f5f8;
+            }
             .gpt-model-picker-toggles {
                 display: grid; flex: 0 0 auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px;
             }
@@ -1852,11 +3299,13 @@
             .gpt-model-picker-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
             .gpt-model-picker-checkbox { width: 14px; height: 14px; flex: 0 0 14px; margin: 0; accent-color: #69afed; }
             .gpt-model-picker-diagnostics {
-                display: grid; min-height: 0; flex: 1 1 auto; align-content: start; gap: 2px; box-sizing: border-box;
-                padding: 6px; overflow: hidden; background: #0b0e11; border: 1px solid #2a323b; border-radius: 6px;
-                font-size: 9.5px; line-height: 1.25;
+                display: grid; min-height: 150px; max-height: 260px; flex: 0 0 auto; align-content: start; gap: 3px;
+                box-sizing: border-box; padding: 6px; overflow: auto; background: #0b0e11;
+                border: 1px solid #2a323b; border-radius: 6px; font-size: 9.5px; line-height: 1.25;
             }
-            .gpt-model-picker-status { color: #c7ccd1; word-break: break-word; }
+            .gpt-model-picker-status {
+                min-width: 0; color: #c7ccd1; overflow-wrap: anywhere; word-break: break-word; white-space: normal;
+            }
             .gpt-model-picker-status[data-status-type='success'] { color: #45c97a; }
             .gpt-model-picker-status[data-status-type='warning'] { color: #e3a12f; }
             .gpt-model-picker-status[data-status-type='error'] { color: #e16b6b; }
@@ -1882,6 +3331,18 @@
             state.resizeObserver.disconnect();
             state.resizeObserver = null;
         }
+
+        if (state.surfaceProjectionTimer !== null) {
+            window.clearTimeout(state.surfaceProjectionTimer);
+            state.surfaceProjectionTimer = null;
+        }
+
+        if (state.surfaceProjectionObserver) {
+            state.surfaceProjectionObserver.disconnect();
+            state.surfaceProjectionObserver = null;
+        }
+
+        clearSurfaceProjection();
 
         const descriptor = Object.getOwnPropertyDescriptor(window, 'fetch');
 
@@ -1944,7 +3405,13 @@
         setSelectedModel,
         setSelectedThinkingEffort,
         setFastModeEnabled,
+        setSelectedConversationExperience,
         setForceChatEnabled,
+        setBackendOverride,
+        getRenderedChatSurfaceMode,
+        findChatSurfaceReactDispatcher,
+        getChatSurfaceFiberAnchors,
+        getReactRootFibers,
         updateRequestBody,
         restoreHook
     };

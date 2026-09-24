@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GPT Models",
-  "version": "1.0.0",
-  "description": "Ручной выбор модели, thinking effort, service tier и Chat Mode в ChatGPT с историей UI-каталогов.",
+  "version": "1.3.3",
+  "description": "Ручной выбор модели, thinking effort, service tier, UI Chat/Work и режимных backend-полей ChatGPT.",
   "content_scripts": [
     {
       "matches": [
